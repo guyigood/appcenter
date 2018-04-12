@@ -41,9 +41,75 @@ func init()  {
  	data := common.Getini("conf/app.ini", "token", map[string]string{"appid": "gysdk", "appkey": ""})
 	client.Do("SET", "appid", data["appid"])
 	client.Do("SET", "appkey", data["appkey"])
+	/*初始化路由表*/
+	db:=lib.NewQuerybuilder()
+	host_data:=db.Query("select name from sl_host group by name")
+	for _,v:=range host_data{
+		db.Dbinit()
+		host_tmp:=db.Tbname("host").Where(fmt.Sprintf("name='%v'",v["name"])).Select()
+		host_json, _ := json.Marshal(host_tmp)
+		client.Do("SET", "server_host_"+v["name"], host_json)
+		db.Dbinit()
+		r_data:=db.Tbname("route").Where(fmt.Sprintf("name='%v'",v["name"])).Select()
+		for _,val:=range r_data{
+			r_json, _ := json.Marshal(&val)
+			client.Do("HSET", "url_route",val["url_map"], r_json)
+		}
+	}
 	site := common.Getini("conf/app.ini", "server", map[string]string{"site_name": ""})
 	Site_name=site["site_name"]
+	//fmt.Println(get_redis_route("jxcapi/login"))
 
+}
+
+func get_redis_route(url_str string)(string,map[string]string){
+	redis_ct := redispack.Get_redis_pool()
+	client := redis_ct.Get()
+	defer client.Close()
+	r_db,_:=client.Do("HGET","url_route",url_str)
+	if(r_db==nil){
+		return "",nil
+	}
+
+	r_data:=make(map[string]string)
+	json.Unmarshal(r_db.([]byte),&r_data)
+
+	host,_:=client.Do("GET","server_host_"+r_data["name"])
+	if(host==nil){
+		return "",r_data
+	}
+	host_data:=make([]map[string]string,0)
+	json.Unmarshal(host.([]byte),&host_data)
+	server_ct:=0
+	if(len(host_data)>1){
+		server_ct=rand.Intn(len(host_data))
+	}
+	server_host:=host_data[server_ct]["host"]
+	server_port:=host_data[server_ct]["port"]
+	result:=server_host+":"+server_port
+	if(server_port!="80") {
+		result = server_host + ":" + server_port
+	}
+	//fmt.Println(server_ct,result,r_data)
+	return result,r_data
+}
+
+func get_mysql_route(url_str string)(string,map[string]string){
+	db := lib.NewQuerybuilder()
+	data := db.Tbname("route").Where(fmt.Sprintf("url_map='%v'", url_str)).Find();
+	db.Dbinit()
+	host_data:=db.Tbname("host").Where(fmt.Sprintf("name='%v'",data["name"])).Select()
+	server_ct:=0;
+	if(len(host_data)>1){
+		server_ct=rand.Intn(len(host_data))
+	}
+	server_host:=host_data[server_ct]["host"]
+	server_port:=host_data[server_ct]["port"]
+	result:=server_host+":"+server_port
+	if(server_port!="80") {
+		result = server_host + ":" + server_port
+	}
+	return result,data
 }
 
 func ApiHandler(w http.ResponseWriter, r *http.Request) {
@@ -51,6 +117,10 @@ func ApiHandler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("content-type", "application/json")
 	get_url := r.URL.RawQuery                 //获取get字符串
 	pathInfo := strings.Trim(r.URL.Path, "/") //获取url路由名称
+	//路由为空，设置为根目录
+	if(pathInfo==""){
+		pathInfo="root"
+	}
 	mycon := new(Controller)
 	mycon.JsonData = make(map[string]interface{})
 	mycon.Postdata = make(map[string]interface{})
@@ -99,9 +169,7 @@ func (this *Controller) struct_init() {
 }
 
 func (this *Controller) url_route(urlpath, get_url string) {
-	db := lib.NewQuerybuilder()
-	data := db.Tbname("route").Where(fmt.Sprintf("url_map='%v'", urlpath)).Find();
-	//fmt.Println(db.GetLastSql())
+	url_add,data:=get_redis_route(urlpath)
 	if (len(data) == 0) {
 		this.error_return("路由错误")
 		return
@@ -127,11 +195,8 @@ func (this *Controller) url_route(urlpath, get_url string) {
 		return;
 	}
 	result := ""
-	url_add:=data["host"]
-	if(data["port"]!="80"){
-		url_add+=":"+data["port"]
-	}
 	url_add+="/"+data["url"]+"/"
+	fmt.Println(url_add)
 	if (get_url != "") {
 		url_add += "?" + get_url
 	}
@@ -149,6 +214,7 @@ func (this *Controller) url_route(urlpath, get_url string) {
 	{
 		result,_=webclient.DoBytesPost(url_add,this.Body)
 	}
+	//fmt.Println(string (result))
 	//fmt.Println(data["method"])
 	data2 := []byte(result)
 	this.w.Write(data2)
